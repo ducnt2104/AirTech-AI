@@ -1,0 +1,558 @@
+import { useEffect, useRef, useState, useCallback } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import {
+  PenTool,
+  Highlighter,
+  Eraser,
+  MousePointer,
+  ArrowUpRight,
+  Minus,
+  Square,
+  Circle,
+  Type,
+  Undo2,
+  Redo2,
+  Trash2,
+  Download,
+  Save,
+  RotateCcw,
+  RotateCw,
+  ZoomIn,
+  ZoomOut,
+  Maximize,
+  Minimize,
+  Settings,
+  Layers,
+  Hand,
+  Palette,
+  MoreHorizontal,
+  X,
+  ChevronDown,
+} from 'lucide-react';
+import { useAppStore } from '@/stores/appStore';
+import { useSettingsStore } from '@/stores/settingsStore';
+import { drawingEngine } from '@/drawing/DrawingEngine';
+import { BoardRepository, LessonRepository } from '@/database';
+import { Button } from '@/components/ui/Button';
+import { Card } from '@/components/ui/Card';
+import { ColorPicker } from '@/components/ui/ColorPicker';
+import { StrokeWidthPicker } from '@/components/ui/StrokeWidthPicker';
+import { cn } from '@/utils/cn';
+import type { DrawingTool, Viewport } from '@/types';
+
+const TOOLS: { id: DrawingTool; icon: React.ReactNode; label: string; shortcut?: string }[] = [
+  { id: 'pointer', icon: <MousePointer className="w-5 h-5" />, label: 'Con trỏ', shortcut: 'V' },
+  { id: 'pen', icon: <PenTool className="w-5 h-5" />, label: 'Bút', shortcut: 'P' },
+  { id: 'highlighter', icon: <Highlighter className="w-5 h-5" />, label: 'Highlight', shortcut: 'H' },
+  { id: 'eraser', icon: <Eraser className="w-5 h-5" />, label: 'Tẩy', shortcut: 'E' },
+  { id: 'arrow', icon: <ArrowUpRight className="w-5 h-5" />, label: 'Mũi tên', shortcut: 'A' },
+  { id: 'line', icon: <Minus className="w-5 h-5" />, label: 'Đường thẳng', shortcut: 'L' },
+  { id: 'rectangle', icon: <Square className="w-5 h-5" />, label: 'Hình chữ nhật', shortcut: 'R' },
+  { id: 'circle', icon: <Circle className="w-5 h-5" />, label: 'Hình tròn', shortcut: 'C' },
+  { id: 'text', icon: <Type className="w-5 h-5" />, label: 'Văn bản', shortcut: 'T' },
+];
+
+const COLORS = [
+  '#000000', '#ef4444', '#f97316', '#f59e0b', '#eab308',
+  '#22c55e', '#10b981', '#14b8a6', '#06b6d4', '#0ea5e9',
+  '#3b82f6', '#6366f1', '#8b5cf6', '#a855f7', '#d946ef',
+  '#ec4899', '#f43f5e', '#ffffff',
+];
+
+export default function Whiteboard() {
+  const navigate = useNavigate();
+  const { lessonId } = useParams();
+  const { mode, setMode, currentLesson, currentBoard, sessionState, updateSessionState, setCurrentBoard } = useAppStore();
+  const { settings } = useSettingsStore();
+  const [isToolbarOpen, setIsToolbarOpen] = useState(true);
+  const [showColorPicker, setShowColorPicker] = useState(false);
+  const [showStrokePicker, setShowStrokePicker] = useState(false);
+  const [viewport, setViewport] = useState<Viewport>({ x: 0, y: 0, scale: 1, rotation: 0 });
+  const [isPanning, setIsPanning] = useState(false);
+  const [panStart, setPanStart] = useState({ x: 0, y: 0 });
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const animationRef = useRef<number>();
+
+  useEffect(() => {
+    drawingEngine.setTool(sessionState.currentTool);
+    drawingEngine.setColor(sessionState.currentColor);
+    drawingEngine.setWidth(sessionState.currentWidth);
+    drawingEngine.setViewport(sessionState.viewport);
+    drawingEngine.loadStrokes(currentBoard?.strokes || []);
+    
+    const unsubscribe = drawingEngine.onChange(() => {
+      if (currentBoard) {
+        BoardRepository.update({
+          ...currentBoard,
+          strokes: drawingEngine.getStrokes(),
+          viewport: drawingEngine.getState().viewport,
+          updatedAt: new Date(),
+        });
+      }
+    });
+    
+    const unsubscribeStore = useAppStore.subscribe(
+      (state) => state.sessionState,
+      (newState) => {
+        drawingEngine.setTool(newState.currentTool);
+        drawingEngine.setColor(newState.currentColor);
+        drawingEngine.setWidth(newState.currentWidth);
+        drawingEngine.setViewport(newState.viewport);
+      }
+    );
+
+    startRenderLoop();
+    
+    return () => {
+      unsubscribe();
+      unsubscribeStore();
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
+    };
+  }, [currentBoard, sessionState.currentTool, sessionState.currentColor, sessionState.currentWidth]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      
+      switch (e.key.toLowerCase()) {
+        case 'v': updateSessionState({ currentTool: 'pointer' }); break;
+        case 'p': updateSessionState({ currentTool: 'pen' }); break;
+        case 'h': updateSessionState({ currentTool: 'highlighter' }); break;
+        case 'e': updateSessionState({ currentTool: 'eraser' }); break;
+        case 'a': updateSessionState({ currentTool: 'arrow' }); break;
+        case 'l': updateSessionState({ currentTool: 'line' }); break;
+        case 'r': updateSessionState({ currentTool: 'rectangle' }); break;
+        case 'c': updateSessionState({ currentTool: 'circle' }); break;
+        case 't': updateSessionState({ currentTool: 'text' }); break;
+        case 'z': e.ctrlKey || e.metaKey ? (e.shiftKey ? drawingEngine.redo() : drawingEngine.undo()) : null; break;
+        case 'y': drawingEngine.redo(); break;
+        case '=': case '+': zoom(1.2); break;
+        case '-': zoom(0.8); break;
+        case '0': resetViewport(); break;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [updateSessionState]);
+
+  const startRenderLoop = () => {
+    const render = () => {
+      drawCanvas();
+      animationRef.current = requestAnimationFrame(render);
+    };
+    render();
+  };
+
+  const drawCanvas = () => {
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const rect = container.getBoundingClientRect();
+    
+    if (canvas.width !== rect.width * dpr || canvas.height !== rect.height * dpr) {
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      canvas.style.width = `${rect.width}px`;
+      canvas.style.height = `${rect.height}px`;
+    }
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    ctx.scale(dpr, dpr);
+    ctx.translate(viewport.x, viewport.y);
+    ctx.scale(viewport.scale, viewport.scale);
+    ctx.rotate(viewport.rotation);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(-viewport.x / viewport.scale, -viewport.y / viewport.scale, rect.width / viewport.scale, rect.height / viewport.scale);
+
+    const strokes = drawingEngine.getStrokes();
+    for (const stroke of strokes) {
+      drawStroke(ctx, stroke);
+    }
+
+    const currentStroke = drawingEngine.getCurrentStroke();
+    if (currentStroke) {
+      drawStroke(ctx, currentStroke);
+    }
+  };
+
+  const drawStroke = (ctx: CanvasRenderingContext2D, stroke: any) => {
+    const points = stroke.points;
+    if (points.length < 2) return;
+
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+
+    if (points.length === 2) {
+      ctx.lineTo(points[1].x, points[1].y);
+    } else {
+      for (let i = 1; i < points.length - 1; i++) {
+        const xc = (points[i].x + points[i + 1].x) / 2;
+        const yc = (points[i].y + points[i + 1].y) / 2;
+        ctx.quadraticCurveTo(points[i].x, points[i].y, xc, yc);
+      }
+      ctx.lineTo(points[points.length - 1].x, points[points.length - 1].y);
+    }
+
+    const isHighlighter = stroke.tool === 'highlighter';
+    ctx.strokeStyle = isHighlighter ? stroke.color + '80' : stroke.color;
+    ctx.lineWidth = stroke.width;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.globalCompositeOperation = isHighlighter ? 'multiply' : 'source-over';
+    ctx.stroke();
+    ctx.globalCompositeOperation = 'source-over';
+  };
+
+  const handlePointerDown = (e: React.PointerEvent) => {
+    const tool = sessionState.currentTool;
+    if (tool === 'pointer') {
+      setIsPanning(true);
+      setPanStart({ x: e.clientX - viewport.x, y: e.clientY - viewport.y });
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      return;
+    }
+
+    if (tool === 'eraser') {
+      const point = getCanvasPoint(e.clientX, e.clientY);
+      drawingEngine.startStroke(point);
+      return;
+    }
+
+    const point = getCanvasPoint(e.clientX, e.clientY);
+    drawingEngine.startStroke(point);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (isPanning) {
+      const newViewport = {
+        ...viewport,
+        x: e.clientX - panStart.x,
+        y: e.clientY - panStart.y,
+      };
+      setViewport(newViewport);
+      updateSessionState({ viewport: newViewport });
+      drawingEngine.setViewport(newViewport);
+      return;
+    }
+
+    if (drawingEngine.getState().currentStroke || sessionState.currentTool === 'eraser') {
+      const point = getCanvasPoint(e.clientX, e.clientY);
+      drawingEngine.addPoint(point);
+    }
+  };
+
+  const handlePointerUp = (e: React.PointerEvent) => {
+    if (isPanning) {
+      setIsPanning(false);
+      return;
+    }
+
+    drawingEngine.endStroke();
+  };
+
+  const handlePointerLeave = () => {
+    if (isPanning) {
+      setIsPanning(false);
+    }
+    drawingEngine.cancelStroke();
+  };
+
+  const getCanvasPoint = (clientX: number, clientY: number) => {
+    const container = containerRef.current;
+    if (!container) return { x: 0, y: 0, timestamp: Date.now() };
+    
+    const rect = container.getBoundingClientRect();
+    return {
+      x: (clientX - rect.left - viewport.x) / viewport.scale,
+      y: (clientY - rect.top - viewport.y) / viewport.scale,
+      timestamp: Date.now(),
+    };
+  };
+
+  const zoom = (factor: number) => {
+    const container = containerRef.current;
+    if (!container) return;
+    
+    const rect = container.getBoundingClientRect();
+    const centerX = rect.width / 2;
+    const centerY = rect.height / 2;
+    
+    const newScale = Math.min(5, Math.max(0.1, viewport.scale * factor));
+    const scaleRatio = newScale / viewport.scale;
+    
+    const newViewport: Viewport = {
+      ...viewport,
+      scale: newScale,
+      x: centerX - (centerX - viewport.x) * scaleRatio,
+      y: centerY - (centerY - viewport.y) * scaleRatio,
+    };
+    
+    setViewport(newViewport);
+    updateSessionState({ viewport: newViewport });
+    drawingEngine.setViewport(newViewport);
+  };
+
+  const resetViewport = () => {
+    const newViewport: Viewport = { x: 0, y: 0, scale: 1, rotation: 0 };
+    setViewport(newViewport);
+    updateSessionState({ viewport: newViewport });
+    drawingEngine.setViewport(newViewport);
+  };
+
+  const handleWheel = (e: React.WheelEvent) => {
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) {
+      const factor = e.deltaY > 0 ? 0.9 : 1.1;
+      zoom(factor);
+    } else {
+      setViewport(v => {
+        const newV = { ...v, x: v.x - e.deltaX, y: v.y - e.deltaY };
+        updateSessionState({ viewport: newV });
+        drawingEngine.setViewport(newV);
+        return newV;
+      });
+    }
+  };
+
+  const handleSelectTool = (tool: DrawingTool) => {
+    updateSessionState({ currentTool: tool });
+  };
+
+  const handleColorChange = (color: string) => {
+    updateSessionState({ currentColor: color });
+    setShowColorPicker(false);
+  };
+
+  const handleStrokeChange = (width: number) => {
+    updateSessionState({ currentWidth: width });
+    setShowStrokePicker(false);
+  };
+
+  const handleUndo = () => drawingEngine.undo();
+  const handleRedo = () => drawingEngine.redo();
+  const handleClear = () => {
+    if (confirm('Xóa toàn bộ bảng trắng?')) {
+      drawingEngine.clearAll();
+    }
+  };
+
+  const handleSave = async () => {
+    if (!currentBoard) return;
+    
+    BoardRepository.update({
+      ...currentBoard,
+      strokes: drawingEngine.getStrokes(),
+      viewport: drawingEngine.getState().viewport,
+      updatedAt: new Date(),
+    });
+    
+    if (currentLesson) {
+      LessonRepository.update({
+        ...currentLesson,
+        boards: currentLesson.boards.map((b: any) => 
+          b.id === currentBoard.id ? { ...currentBoard, strokes: drawingEngine.getStrokes() } : b
+        ),
+        updatedAt: new Date(),
+      });
+    }
+  };
+
+  const handleExport = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    
+    const link = document.createElement('a');
+    link.download = `whiteboard-${Date.now()}.png`;
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+  };
+
+  return (
+    <div className="h-screen flex flex-col bg-gray-100 dark:bg-gray-900">
+      <header className="h-14 border-b border-gray-200 dark:border-gray-700 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md flex items-center justify-between px-4 z-30">
+        <div className="flex items-center gap-4">
+          <Button variant="ghost" size="icon" onClick={() => navigate(-1)}>
+            <ChevronDown className="w-5 h-5" />
+          </Button>
+          <h1 className="font-semibold text-gray-900 dark:text-white">
+            {currentLesson?.title || 'Bảng trắng mới'}
+          </h1>
+          {currentLesson && (
+            <span className="px-2 py-0.5 text-xs rounded-full bg-primary-100 text-primary-700 dark:bg-primary-900/30 dark:text-primary-300">
+              {currentLesson.subject}
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1 bg-gray-100 dark:bg-gray-800 rounded-lg p-1">
+            <Button variant="ghost" size="icon" onClick={handleUndo} disabled={!drawingEngine.canUndo()}>
+              <Undo2 className="w-5 h-5" />
+            </Button>
+            <Button variant="ghost" size="icon" onClick={handleRedo} disabled={!drawingEngine.canRedo()}>
+              <Redo2 className="w-5 h-5" />
+            </Button>
+          </div>
+          
+          <Button variant="ghost" size="icon" onClick={handleSave}>
+            <Save className="w-5 h-5" />
+          </Button>
+          <Button variant="ghost" size="icon" onClick={handleExport}>
+            <Download className="w-5 h-5" />
+          </Button>
+          <Button variant="ghost" size="icon" onClick={() => setIsToolbarOpen(!isToolbarOpen)}>
+            <Layers className="w-5 h-5" />
+          </Button>
+        </div>
+      </header>
+
+      <div className="flex-1 flex relative overflow-hidden">
+        <div 
+          ref={containerRef}
+          className="flex-1 relative"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerLeave={handlePointerLeave}
+          onWheel={handleWheel}
+          style={{ touchAction: 'none' }}
+        >
+          <canvas ref={canvasRef} className="absolute inset-0" />
+          
+          {isPanning && (
+            <div className="absolute inset-0 cursor-grabbing" style={{ zIndex: 10 }} />
+          )}
+        </div>
+
+        {isToolbarOpen && (
+          <div className="absolute left-4 top-1/2 -translate-y-1/2 z-20">
+            <Toolbar
+              tools={TOOLS}
+              currentTool={sessionState.currentTool}
+              onSelectTool={handleSelectTool}
+              currentColor={sessionState.currentColor}
+              onColorChange={handleColorChange}
+              currentWidth={sessionState.currentWidth}
+              onWidthChange={handleStrokeChange}
+              onUndo={handleUndo}
+              onRedo={handleRedo}
+              canUndo={drawingEngine.canUndo()}
+              canRedo={drawingEngine.canRedo()}
+              onClear={handleClear}
+              zoom={viewport.scale}
+              onZoomIn={() => zoom(1.2)}
+              onZoomOut={() => zoom(0.8)}
+              onResetZoom={resetViewport}
+              showColorPicker={showColorPicker}
+              setShowColorPicker={setShowColorPicker}
+              showStrokePicker={showStrokePicker}
+              setShowStrokePicker={setShowStrokePicker}
+            />
+          )}
+        }
+
+        <div className="absolute bottom-4 right-4 flex flex-col gap-2 z-20">
+          <Button variant="secondary" size="icon" onClick={() => zoom(1.2)}>
+            <ZoomIn className="w-5 h-5" />
+          </Button>
+          <Button variant="secondary" size="icon" onClick={() => zoom(0.8)}>
+            <ZoomOut className="w-5 h-5" />
+          </Button>
+          <Button variant="secondary" size="icon" onClick={resetViewport}>
+            <RotateCcw className="w-5 h-5" />
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Toolbar(props: any) {
+  const { tools, currentTool, onSelectTool, currentColor, onColorChange, currentWidth, onWidthChange,
+    onUndo, onRedo, canUndo, canRedo, onClear, zoom, onZoomIn, onZoomOut, onResetZoom,
+    showColorPicker, setShowColorPicker, showStrokePicker, setShowStrokePicker } = props;
+
+  return (
+    <Card className="w-14 flex flex-col gap-1 p-2 animate-slide-up" variant="elevated">
+      <div className="flex flex-col gap-1">
+        {tools.map((tool) => (
+          <Button
+            key={tool.id}
+            variant={currentTool === tool.id ? 'primary' : 'ghost'}
+            size="icon"
+            onClick={() => onSelectTool(tool.id)}
+            title={`${tool.label} (${tool.shortcut})`}
+          >
+            {tool.icon}
+          </Button>
+        ))}
+      </div>
+
+      <div className="border-t border-gray-200 dark:border-gray-700 my-1 pt-1 flex flex-col gap-1" />
+      
+      <div className="flex flex-col gap-1">
+        <Button variant="ghost" size="icon" onClick={onUndo} disabled={!canUndo}>
+          <Undo2 className="w-5 h-5" />
+        </Button>
+        <Button variant="ghost" size="icon" onClick={onRedo} disabled={!canRedo}>
+          <Redo2 className="w-5 h-5" />
+        </Button>
+        <Button variant="ghost" size="icon" onClick={onClear}>
+          <Trash2 className="w-5 h-5" />
+        </Button>
+      </div>
+
+      <div className="border-t border-gray-200 dark:border-gray-700 my-1 pt-1 flex flex-col gap-1" />
+
+      <Button
+        variant="ghost"
+        size="icon"
+        onClick={() => setShowColorPicker(!showColorPicker)}
+        className={cn('relative', showColorPicker && 'bg-primary-100 dark:bg-primary-900/30')}
+      >
+        <div className="w-5 h-5 rounded border border-gray-300 dark:border-gray-600" style={{ backgroundColor: currentColor }} />
+      </Button>
+      
+      {showColorPicker && (
+        <ColorPicker colors={COLORS} selected={currentColor} onSelect={onColorChange} />
+      )}
+
+      <Button
+        variant="ghost"
+        size="icon"
+        onClick={() => setShowStrokePicker(!showStrokePicker)}
+      >
+        <Minus className="w-5 h-5" style={{ strokeWidth: Math.max(2, currentWidth / 2) }} />
+      </Button>
+      
+      {showStrokePicker && (
+        <StrokeWidthPicker value={currentWidth} onChange={onWidthChange} />
+      )}
+
+      <div className="border-t border-gray-200 dark:border-gray-700 my-1 pt-1 flex flex-col gap-1" />
+
+      <Button variant="ghost" size="icon" onClick={onZoomIn}>
+        <ZoomIn className="w-5 h-5" />
+      </Button>
+      <Button variant="ghost" size="icon" onClick={onZoomOut}>
+        <ZoomOut className="w-5 h-5" />
+      </Button>
+      <Button variant="ghost" size="icon" onClick={onResetZoom}>
+        <RotateCcw className="w-5 h-5" />
+      </Button>
+      <span className="text-center text-xs text-gray-500 dark:text-gray-400 px-1">
+        {Math.round(zoom * 100)}%
+      </span>
+    </Card>
+  );
+}

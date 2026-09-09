@@ -1,0 +1,72 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AIRTECH AI",
+  "version": "1.0.0",
+  "identifier": "com.airtech.ai",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "AIRTECH AI",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 768,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false,
+        "maximizable": true,
+        "decorations": true,
+        "transparent": false,
+        "visible": true,
+        "focus": true,
+        "icon": "icons/icon.png"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' ipc: http://localhost:1420 https://*.google.com https://*.youtube.com https://*.wikipedia.org https://*.bing.com https://*.duckduckgo.com 'unsafe-inline' 'unsafe-eval' data: blob:; img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; connect-src 'self' https:; frame-src 'self' https://*.google.com https://*.youtube.com https://*.wikipedia.org https://*.bing.com https://*.duckduckgo.com;"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "allowToChangeInstallDirectory": true
+      }
+    }
+  },
+  "plugins": {
+    "fs": {
+      "scope": {
+        "allow": [
+          "$APPDATA/airtech-ai/*",
+          "$APPDATA/airtech-ai/**/*"
+        ]
+      }
+    },
+    "dialog": {
+      "open": true,
+      "save": true
+    },
+    "shell": {
+      "scope": {
+        "allow": []
+      }
+    }
+  }
+}
