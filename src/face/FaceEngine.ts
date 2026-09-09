@@ -1,9 +1,24 @@
 import * as faceapi from 'face-api.js';
 import type { FaceDetection, CameraSettings } from '@/types';
 import { getSetting } from '@/stores/settingsStore';
+import { fetchWithTimeout, NetworkError } from '@/utils/network';
 
 type DetectionCallback = (detections: FaceDetection[]) => void;
 type ErrorCallback = (error: Error) => void;
+
+const FACE_API_MODELS = [
+  'tiny_face_detector_model-weights_manifest.json',
+  'tiny_face_detector_model-shard1',
+  'face_landmark_68_model-weights_manifest.json',
+  'face_landmark_68_model-shard1',
+  'face_recognition_model-weights_manifest.json',
+  'face_recognition_model-shard1',
+  'face_expression_model-weights_manifest.json',
+  'face_expression_model-shard1',
+];
+
+const FACE_API_TIMEOUT = 30000;
+const FACE_API_RETRY_DELAY = 2000;
 
 export class FaceEngine {
   private isInitialized = false;
@@ -17,6 +32,9 @@ export class FaceEngine {
   private lastDetectionTime = 0;
   private canvas: HTMLCanvasElement | null = null;
   private displaySize: { width: number; height: number } = { width: 640, height: 480 };
+  private initializationPromise: Promise<void> | null = null;
+  private initializationError: Error | null = null;
+  private modelsLoaded = false;
 
   constructor() {
     this.settings = getSetting('face');
@@ -24,22 +42,126 @@ export class FaceEngine {
 
   async initialize(modelsPath: string = '/models'): Promise<void> {
     if (this.isInitialized) return;
+    if (this.initializationPromise) return this.initializationPromise;
+
+    this.initializationPromise = this.doInitialize(modelsPath);
+    try {
+      await this.initializationPromise;
+    } catch (error) {
+      this.initializationError = error instanceof Error ? error : new Error(String(error));
+      this.initializationPromise = null;
+      throw this.initializationError;
+    }
+  }
+
+  private async doInitialize(modelsPath: string): Promise<void> {
+    const startTime = performance.now();
+    console.log('[FACE] Initializing face-api.js models...');
+
+    const modelConfigs = [
+      { net: faceapi.nets.tinyFaceDetector, name: 'TinyFaceDetector' },
+      { net: faceapi.nets.faceLandmark68Net, name: 'FaceLandmark68' },
+      { net: faceapi.nets.faceRecognitionNet, name: 'FaceRecognition' },
+      { net: faceapi.nets.faceExpressionNet, name: 'FaceExpression' },
+    ];
+
+    const loadResults = await Promise.allSettled(
+      modelConfigs.map(({ net, name }) => this.loadModelWithTimeout(net, modelsPath, name))
+    );
+
+    const failed: Array<{ name: string; reason: unknown }> = [];
+    loadResults.forEach((r, i) => {
+      if (r.status === 'rejected') {
+        failed.push({ name: modelConfigs[i].name, reason: r.reason });
+      }
+    });
+
+    if (failed.length > 0) {
+      const errors = failed.map(f => `${f.name}: ${f.reason}`).join('; ');
+      console.error('[FACE] Some models failed to load:', errors);
+      
+      if (failed.length === modelConfigs.length) {
+        throw new NetworkError(
+          `All face models failed to load: ${errors}`,
+          'ALL_MODELS_FAILED'
+        );
+      }
+      
+      console.warn('[FACE] Continuing with partially loaded models');
+    }
+
+    this.isInitialized = true;
+    this.modelsLoaded = true;
+    console.log(`[FACE] Face models initialized in ${(performance.now() - startTime).toFixed(0)}ms (${modelConfigs.length - failed.length}/${modelConfigs.length} loaded)`);
+  }
+
+  private async loadModelWithTimeout(
+    net: any,
+    modelsPath: string,
+    modelName: string
+  ): Promise<void> {
+    const loadStartTime = performance.now();
+    
+    try {
+      await net.loadFromUri(modelsPath);
+      console.log(`[FACE] ${modelName} loaded from local in ${(performance.now() - loadStartTime).toFixed(0)}ms`);
+      return;
+    } catch (localError) {
+      console.warn(`[FACE] ${modelName} not found locally, trying CDN:`, localError);
+    }
 
     try {
-      await Promise.all([
-        faceapi.nets.tinyFaceDetector.loadFromUri(modelsPath),
-        faceapi.nets.faceLandmark68Net.loadFromUri(modelsPath),
-        faceapi.nets.faceRecognitionNet.loadFromUri(modelsPath),
-        faceapi.nets.faceExpressionNet.loadFromUri(modelsPath),
-      ]);
-
-      this.isInitialized = true;
-      console.log('Face recognition models loaded');
-    } catch (error) {
-      console.error('Failed to load face models:', error);
-      this.notifyError(error as Error);
-      throw error;
+      await this.loadModelFromCdn(net, modelName);
+      console.log(`[FACE] ${modelName} loaded from CDN in ${(performance.now() - loadStartTime).toFixed(0)}ms`);
+    } catch (cdnError) {
+      throw new NetworkError(
+        `${modelName} failed to load from both local and CDN: ${cdnError instanceof Error ? cdnError.message : 'unknown'}`,
+        'MODEL_LOAD_FAILED',
+        undefined,
+        cdnError instanceof Error ? cdnError : undefined
+      );
     }
+  }
+
+  private async loadModelFromCdn(net: any, modelName: string): Promise<void> {
+    const cdnBase = 'https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights/';
+    
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        reject(new NetworkError(`${modelName} CDN load timeout`, 'TIMEOUT'));
+      }, FACE_API_TIMEOUT);
+
+      net.loadFromUri(cdnBase).then(() => {
+        clearTimeout(timeoutId);
+        resolve();
+      }).catch((error: Error) => {
+        clearTimeout(timeoutId);
+        reject(error);
+      });
+    });
+  }
+
+  async initializeWithFallback(modelsPath: string = '/models'): Promise<boolean> {
+    try {
+      await this.initialize(modelsPath);
+      return true;
+    } catch (error) {
+      console.warn('[FACE] Primary initialization failed:', error);
+      this.initializationError = error instanceof Error ? error : new Error(String(error));
+      return false;
+    }
+  }
+
+  isInitializationFailed(): boolean {
+    return this.initializationError !== null;
+  }
+
+  getInitializationError(): Error | null {
+    return this.initializationError;
+  }
+
+  areModelsLoaded(): boolean {
+    return this.modelsLoaded;
   }
 
   async start(video: HTMLVideoElement): Promise<void> {

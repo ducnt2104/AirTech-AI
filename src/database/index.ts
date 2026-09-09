@@ -1,9 +1,18 @@
-import initSqlJs from 'sql.js';
+import initSqlJs, { Database, SqlJsStatic } from 'sql.js';
 import type { Teacher, Lesson, Board, Session, SessionAction, BackupInfo } from '@/types';
+import { fetchWithTimeout, NetworkError } from '@/utils/network';
 
-let db: initSqlJs.Database | null = null;
+let db: Database | null = null;
 const DB_STORE_NAME = 'airtech_db_storage';
 const DB_KEY = 'sqlite_binary';
+const SQL_JS_CDN = 'https://sql.js.org/dist/';
+const SQL_JS_CDN_FALLBACK = 'https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/';
+const SQL_JS_TIMEOUT = 15000;
+
+interface SqlJsConfig {
+  locateFile?: (file: string) => string;
+  wasmBinary?: ArrayBuffer | Uint8Array;
+}
 
 function openIndexedDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -38,7 +47,7 @@ async function loadDbFromStorage(): Promise<Uint8Array | null> {
       req.onerror = () => resolve(null);
     });
   } catch (err) {
-    console.warn('Could not load from IndexedDB, falling back to memory', err);
+    console.warn('[DB] Could not load from IndexedDB, falling back to memory', err);
     return null;
   }
 }
@@ -56,35 +65,80 @@ export async function persistDatabase(): Promise<void> {
       req.onerror = () => reject(req.error);
     });
   } catch (err) {
-    console.warn('Could not persist database to IndexedDB', err);
+    console.warn('[DB] Could not persist database to IndexedDB', err);
   }
 }
 
-export async function initDatabase(): Promise<initSqlJs.Database> {
+async function loadSqlJsWithTimeout(): Promise<SqlJsStatic> {
+  const wasmUrl = `${SQL_JS_CDN}sql-wasm.wasm`;
+  const fallbackWasmUrl = `${SQL_JS_CDN_FALLBACK}sql-wasm.wasm`;
+
+  try {
+    const wasmResponse = await fetchWithTimeout(wasmUrl, { timeout: SQL_JS_TIMEOUT });
+    if (!wasmResponse.ok) throw new Error(`HTTP ${wasmResponse.status}`);
+    const wasmBytes = await wasmResponse.arrayBuffer();
+    
+    return await initSqlJs({
+      locateFile: (file: string) => `${SQL_JS_CDN}${file}`,
+      wasmBinary: wasmBytes,
+    } as SqlJsConfig);
+  } catch (primaryError) {
+    console.warn('[DB] Primary CDN failed, trying fallback:', primaryError);
+    try {
+      const wasmResponse = await fetchWithTimeout(fallbackWasmUrl, { timeout: SQL_JS_TIMEOUT });
+      if (!wasmResponse.ok) throw new Error(`HTTP ${wasmResponse.status}`);
+      const wasmBytes = await wasmResponse.arrayBuffer();
+      
+      return await initSqlJs({
+        locateFile: (file: string) => `${SQL_JS_CDN_FALLBACK}${file}`,
+        wasmBinary: wasmBytes,
+      } as SqlJsConfig);
+    } catch (fallbackError) {
+      throw new NetworkError(
+        `Failed to load sql.js from both CDNs: ${primaryError instanceof Error ? primaryError.message : 'unknown'}`,
+        'CDN_FAILED',
+        undefined,
+        fallbackError instanceof Error ? fallbackError : undefined
+      );
+    }
+  }
+}
+
+export async function initDatabase(): Promise<Database> {
   if (db) return db;
 
-  const SQL = await initSqlJs({
-    locateFile: (file: string) => `https://sql.js.org/dist/${file}`
-  });
+  const startTime = performance.now();
+  console.log('[DB] Initializing sql.js...');
+
+  let SQL: SqlJsStatic;
+  try {
+    SQL = await loadSqlJsWithTimeout();
+    console.log(`[DB] sql.js loaded in ${(performance.now() - startTime).toFixed(0)}ms`);
+  } catch (error) {
+    console.error('[DB] Failed to load sql.js, using in-memory fallback:', error);
+    SQL = await initSqlJs();
+  }
 
   const savedData = await loadDbFromStorage();
   if (savedData && savedData.length > 0) {
     db = new SQL.Database(savedData);
+    console.log('[DB] Loaded existing database from IndexedDB');
   } else {
     db = new SQL.Database();
+    console.log('[DB] Created new in-memory database');
   }
 
   runMigrations(db);
 
-  // Auto-persist database periodically
   setInterval(() => {
     persistDatabase();
   }, 4000);
 
-  return db;
+  console.log(`[DB] Database initialized in ${(performance.now() - startTime).toFixed(0)}ms`);
+  return db!;
 }
 
-function runMigrations(db: initSqlJs.Database): void {
+function runMigrations(db: Database): void {
   const migrations = [
     `CREATE TABLE IF NOT EXISTS teachers (
       id TEXT PRIMARY KEY,

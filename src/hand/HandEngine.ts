@@ -1,9 +1,20 @@
 import { Hands, Results } from '@mediapipe/hands';
 import type { HandLandmarks, Point3D, BoundingBox, CameraSettings } from '@/types';
 import { getSetting } from '@/stores/settingsStore';
+import { fetchWithTimeout, NetworkError } from '@/utils/network';
 
 type HandCallback = (landmarks: HandLandmarks[]) => void;
 type ErrorCallback = (error: Error) => void;
+
+const MEDIAPIPE_CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands/';
+const MEDIAPIPE_CDN_FALLBACK = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/';
+const MEDIAPIPE_TIMEOUT = 20000;
+const MEDIAPIPE_WASM_FILES = [
+  'hands-simd.wasm',
+  'hands-simd.wasm.map',
+  'hands.wasm',
+  'hands.wasm.map',
+];
 
 export class HandEngine {
   private hands: Hands | null = null;
@@ -13,6 +24,8 @@ export class HandEngine {
   private onErrorCallbacks: Set<ErrorCallback> = new Set();
   private lastResults: HandLandmarks[] = [];
   private settings: ReturnType<typeof getSetting>;
+  private initializationPromise: Promise<void> | null = null;
+  private initializationError: Error | null = null;
 
   constructor() {
     this.settings = getSetting('gesture');
@@ -20,12 +33,37 @@ export class HandEngine {
 
   async initialize(): Promise<void> {
     if (this.hands) return;
+    if (this.initializationPromise) return this.initializationPromise;
 
-    this.hands = new Hands({
-      locateFile: (file) => {
-        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
-      },
-    });
+    this.initializationPromise = this.doInitialize();
+    try {
+      await this.initializationPromise;
+    } catch (error) {
+      this.initializationError = error instanceof Error ? error : new Error(String(error));
+      this.initializationPromise = null;
+      throw this.initializationError;
+    }
+  }
+
+  private async doInitialize(): Promise<void> {
+    const startTime = performance.now();
+    console.log('[HAND] Initializing MediaPipe Hands...');
+
+    try {
+      await this.loadMediaPipeWithTimeout();
+    } catch (error) {
+      console.error('[HAND] Failed to load MediaPipe Hands:', error);
+      throw new NetworkError(
+        `MediaPipe Hands initialization failed: ${error instanceof Error ? error.message : 'unknown'}`,
+        'MEDIAPIPE_INIT_FAILED',
+        undefined,
+        error instanceof Error ? error : undefined
+      );
+    }
+
+    if (!this.hands) {
+      throw new Error('MediaPipe Hands not initialized');
+    }
 
     this.hands.setOptions({
       maxNumHands: 2,
@@ -36,7 +74,115 @@ export class HandEngine {
 
     this.hands.onResults(this.onResults.bind(this));
     
-    console.log('Hand tracking initialized');
+    console.log(`[HAND] MediaPipe Hands initialized in ${(performance.now() - startTime).toFixed(0)}ms`);
+  }
+
+  private async loadMediaPipeWithTimeout(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const loadStartTime = performance.now();
+      
+      const hands = new Hands({
+        locateFile: (file) => {
+          return `${MEDIAPIPE_CDN}${file}`;
+        },
+      });
+
+      let resolved = false;
+      const timeoutId = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          reject(new NetworkError(
+            `MediaPipe Hands load timeout after ${MEDIAPIPE_TIMEOUT}ms`,
+            'TIMEOUT'
+          ));
+        }
+      }, MEDIAPIPE_TIMEOUT);
+
+      const checkReady = () => {
+        if (resolved) return;
+        
+        try {
+          hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.5,
+          });
+          
+          clearTimeout(timeoutId);
+          resolved = true;
+          this.hands = hands;
+          console.log(`[HAND] MediaPipe Hands ready in ${(performance.now() - loadStartTime).toFixed(0)}ms`);
+          resolve();
+        } catch {
+          if (!resolved) {
+            setTimeout(checkReady, 100);
+          }
+        }
+      };
+
+      checkReady();
+    });
+  }
+
+  async initializeWithFallback(): Promise<boolean> {
+    try {
+      await this.initialize();
+      return true;
+    } catch (primaryError) {
+      console.warn('[HAND] Primary CDN failed, trying fallback:', primaryError);
+      
+      try {
+        await this.loadMediaPipeFallback();
+        console.log('[HAND] MediaPipe Hands loaded via fallback');
+        return true;
+      } catch (fallbackError) {
+        console.error('[HAND] Fallback also failed:', fallbackError);
+        this.initializationError = fallbackError instanceof Error ? fallbackError : new Error(String(fallbackError));
+        return false;
+      }
+    }
+  }
+
+  private async loadMediaPipeFallback(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const hands = new Hands({
+        locateFile: (file) => {
+          return `${MEDIAPIPE_CDN_FALLBACK}${file}`;
+        },
+      });
+
+      const timeoutId = setTimeout(() => {
+        reject(new NetworkError('Fallback CDN timeout', 'TIMEOUT'));
+      }, MEDIAPIPE_TIMEOUT);
+
+      const checkReady = () => {
+        try {
+          hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.5,
+          });
+          
+          clearTimeout(timeoutId);
+          this.hands = hands;
+          resolve();
+        } catch {
+          setTimeout(checkReady, 100);
+        }
+      };
+
+      checkReady();
+    });
+  }
+
+  isInitializationFailed(): boolean {
+    return this.initializationError !== null;
+  }
+
+  getInitializationError(): Error | null {
+    return this.initializationError;
   }
 
   async start(video: HTMLVideoElement): Promise<void> {

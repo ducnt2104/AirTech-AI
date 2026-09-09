@@ -1,13 +1,9 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
-import { useEffect } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useAppStore } from '@/stores/appStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useTeacherStore } from '@/stores/teacherStore';
-import { initDatabase } from '@/database';
-import { seedDemoData } from '@/database/seed';
-import { faceEngine } from '@/face/FaceEngine';
-import { handEngine } from '@/hand/HandEngine';
-import { gestureEngine } from '@/gesture/GestureEngine';
+import { startupManager, type StartupResult, type StartupStep } from '@/startup/StartupManager';
 import Dashboard from '@/pages/Dashboard';
 import Whiteboard from '@/pages/Whiteboard';
 import Lesson from '@/pages/Lesson';
@@ -19,44 +15,115 @@ import Teaching from '@/pages/Teaching';
 import FirstRunSetup from '@/pages/FirstRunSetup';
 import LoadingScreen from '@/components/LoadingScreen';
 import ErrorBoundary from '@/components/ErrorBoundary';
+import { DegradedModeIndicator, StartupPerformanceBadge } from '@/components/DegradedModeIndicator';
+
+interface StartupState {
+  isComplete: boolean;
+  result: StartupResult | null;
+  currentStep: StartupStep | null;
+  progress: number;
+}
 
 function AppRoutes() {
-  const { mode, isLoading, currentTeacher, setMode } = useAppStore();
+  const { mode, isLoading, currentTeacher, setMode, setLoading } = useAppStore();
   const { isLoaded: settingsLoaded, loadSettings } = useSettingsStore();
   const { teachers, loadTeachers } = useTeacherStore();
+  const [startupState, setStartupState] = useState<StartupState>({
+    isComplete: false,
+    result: null,
+    currentStep: null,
+    progress: 0,
+  });
+  const [uiReady, setUiReady] = useState(false);
 
   useEffect(() => {
-    async function initialize() {
+    setUiReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!uiReady) return;
+
+    let mounted = true;
+
+    async function initializeApp() {
       try {
-        await initDatabase();
-        seedDemoData();
-        await loadSettings();
-        await loadTeachers();
+        startupManager.onProgress((step, overallProgress) => {
+          if (!mounted) return;
+          setStartupState(prev => ({
+            ...prev,
+            currentStep: step,
+            progress: overallProgress,
+          }));
+        });
+
+        startupManager.onPhaseChange((phase) => {
+          if (!mounted) return;
+          console.log(`[STARTUP] Phase: ${phase}`);
+        });
+
+        startupManager.onComplete((result) => {
+          if (!mounted) return;
+          
+          setStartupState(prev => ({
+            ...prev,
+            isComplete: true,
+            result,
+          }));
+
+          if (result.mode === 'offline') {
+            useAppStore.getState().setError('Chạy ở chế độ offline - một số tính năng có thể bị hạn chế');
+          } else if (result.mode === 'degraded') {
+            useAppStore.getState().setError(`Chạy ở chế độ hạn chế: ${result.warnings.join(', ')}`);
+          }
+
+          setLoading(false);
+          console.log(`[STARTUP] Completed in ${result.totalDuration.toFixed(0)}ms (mode: ${result.mode})`);
+          
+          if (result.totalDuration > 60000) {
+            console.warn(`[STARTUP] WARNING: Startup took ${(result.totalDuration / 1000).toFixed(1)}s (target: <60s)`);
+          }
+        });
+
+        const result = await startupManager.execute();
         
-        await faceEngine.initialize('/models');
-        await handEngine.initialize();
-        
-        gestureEngine.start();
-        
-        console.log('AIRTECH AI initialized successfully');
+        if (mounted && result.success) {
+          await loadSettings();
+          await loadTeachers();
+        }
       } catch (error) {
-        console.error('Initialization error:', error);
-      } finally {
-        useAppStore.getState().setLoading(false);
+        if (!mounted) return;
+        console.error('[STARTUP] Fatal error:', error);
+        setLoading(false);
+        useAppStore.getState().setError('Lỗi khởi động nghiêm trọng');
       }
     }
-    
-    initialize();
-  }, [loadSettings, loadTeachers]);
 
-  if (isLoading || !settingsLoaded) {
+    initializeApp();
+
+    return () => {
+      mounted = false;
+    };
+  }, [uiReady, loadSettings, loadTeachers]);
+
+  if (!uiReady) {
     return <LoadingScreen />;
+  }
+
+  if (!startupState.isComplete) {
+    return (
+      <LoadingScreen 
+        progress={startupState.progress}
+        currentStep={startupState.currentStep?.name}
+      />
+    );
   }
 
   const needsSetup = teachers.length === 0;
 
   return (
     <ErrorBoundary>
+      <DegradedModeIndicator />
+      <StartupPerformanceBadge />
       <Routes>
         {needsSetup ? (
           <Route path="/*" element={<FirstRunSetup />} />
