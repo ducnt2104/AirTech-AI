@@ -9,7 +9,16 @@ export interface ModalProps {
   title?: string;
   children: React.ReactNode;
   className?: string;
+  size?: 'sm' | 'md' | 'lg' | 'xl' | 'full';
 }
+
+const sizeClasses = {
+  sm: 'max-w-md',
+  md: 'max-w-lg',
+  lg: 'max-w-2xl',
+  xl: 'max-w-4xl',
+  full: 'max-w-[90vw]',
+};
 
 export const Modal: React.FC<ModalProps> = ({
   isOpen = true,
@@ -17,6 +26,7 @@ export const Modal: React.FC<ModalProps> = ({
   title,
   children,
   className,
+  size = 'md',
 }) => {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -39,7 +49,8 @@ export const Modal: React.FC<ModalProps> = ({
       />
       <div
         className={cn(
-          'relative w-full max-w-lg rounded-2xl bg-white dark:bg-gray-800 p-6 shadow-2xl border border-gray-100 dark:border-gray-700 z-10 animate-scale-up',
+          'relative w-full rounded-2xl bg-white dark:bg-gray-800 p-6 shadow-2xl border border-gray-100 dark:border-gray-700 z-10 animate-scale-up',
+          sizeClasses[size],
           className
         )}
         role="dialog"

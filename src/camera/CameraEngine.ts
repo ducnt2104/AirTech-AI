@@ -1,83 +1,78 @@
 import type { CameraDevice, CameraSettings } from '@/types';
+import { cameraManager, CameraError, CameraErrorCode } from '@/camera/CameraManager';
 import { getSetting } from '@/stores/settingsStore';
+import { startupLogger } from '@/utils/startupLogger';
 
 type CameraCallback = (video: HTMLVideoElement) => void;
 type ErrorCallback = (error: Error) => void;
 
 export class CameraEngine {
-  private stream: MediaStream | null = null;
   private video: HTMLVideoElement | null = null;
-  private animationFrame: number | null = null;
   private onFrameCallbacks: Set<CameraCallback> = new Set();
   private onErrorCallbacks: Set<ErrorCallback> = new Set();
   private isRunning = false;
   private settings: CameraSettings;
   private facingMode: 'user' | 'environment' = 'user';
+  private unsubscribeState: (() => void) | null = null;
+  private unsubscribeFrame: (() => void) | null = null;
+  private unsubscribeError: (() => void) | null = null;
+  private initializationPromise: Promise<HTMLVideoElement> | null = null;
 
   constructor() {
     this.settings = getSetting('camera');
     this.facingMode = this.settings.facingMode;
+    
+    // Subscribe to CameraManager state
+    this.unsubscribeState = cameraManager.onStateChange((state, diagnostics) => {
+      startupLogger.debug('CAMERA_ENGINE', `CameraManager state: ${state}`, { 
+        frameReceived: diagnostics.frameReceived,
+        error: diagnostics.error 
+      });
+    });
+    
+    this.unsubscribeFrame = cameraManager.onFrame((video) => {
+      this.notifyFrame(video);
+    });
+    
+    this.unsubscribeError = cameraManager.onError((error) => {
+      this.notifyError(error);
+    });
   }
 
   async getDevices(): Promise<CameraDevice[]> {
     try {
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      return devices
-        .filter(d => d.kind === 'videoinput')
-        .map(d => ({
-          deviceId: d.deviceId,
-          label: d.label || `Camera ${d.deviceId.slice(0, 8)}`,
-          kind: 'videoinput' as const,
-        }));
+      const devices = await cameraManager.getDevices();
+      return devices;
     } catch (error) {
-      console.error('Failed to enumerate devices:', error);
+      startupLogger.error('CAMERA_ENGINE', 'Failed to enumerate devices', error);
       return [];
     }
   }
 
   async start(deviceId?: string): Promise<HTMLVideoElement> {
-    if (this.isRunning) {
-      await this.stop();
+    if (this.isRunning && cameraManager.isRunning()) {
+      this.video = cameraManager.getVideoElement();
+      return this.video!;
     }
 
-    this.video = document.createElement('video');
-    this.video.setAttribute('playsinline', 'true');
-    this.video.setAttribute('autoplay', 'true');
-    this.video.setAttribute('muted', 'true');
-    this.video.style.width = '100%';
-    this.video.style.height = '100%';
-    this.video.style.objectFit = 'cover';
-
-    const constraints: MediaStreamConstraints = {
-      video: {
-        deviceId: deviceId ? { exact: deviceId } : undefined,
-        width: { ideal: this.settings.width },
-        height: { ideal: this.settings.height },
-        frameRate: { ideal: this.settings.frameRate },
-        facingMode: this.facingMode,
-      },
-      audio: false,
-    };
-
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia(constraints);
-      this.video.srcObject = this.stream;
+      // Initialize or re-initialize camera
+      this.video = await cameraManager.initialize(deviceId);
       
-      await new Promise<void>((resolve, reject) => {
-        if (!this.video) return reject(new Error('Video element not created'));
-        
-        this.video.onloadedmetadata = () => {
-          this.video?.play().then(resolve).catch(reject);
-        };
-        this.video.onerror = () => reject(new Error('Video load failed'));
-      });
-
+      // Start the camera stream
+      await cameraManager.start();
+      
       this.isRunning = true;
-      this.startFrameLoop();
+      startupLogger.info('CAMERA_ENGINE', 'Camera started via CameraManager');
       
-      return this.video;
+      return this.video!;
     } catch (error) {
-      this.notifyError(error as Error);
+      if (error instanceof CameraError) {
+        startupLogger.error('CAMERA_ENGINE', `Camera error: ${error.code}`, error.message);
+      } else {
+        startupLogger.error('CAMERA_ENGINE', 'Failed to start camera', error);
+      }
+      this.notifyError(error instanceof Error ? error : new Error(String(error)));
       throw error;
     }
   }
@@ -85,34 +80,85 @@ export class CameraEngine {
   async stop(): Promise<void> {
     this.isRunning = false;
     
-    if (this.animationFrame) {
-      cancelAnimationFrame(this.animationFrame);
-      this.animationFrame = null;
+    if (this.unsubscribeState) {
+      this.unsubscribeState();
+      this.unsubscribeState = null;
     }
-
-    if (this.stream) {
-      this.stream.getTracks().forEach(track => track.stop());
-      this.stream = null;
+    if (this.unsubscribeFrame) {
+      this.unsubscribeFrame();
+      this.unsubscribeFrame = null;
     }
+    if (this.unsubscribeError) {
+      this.unsubscribeError();
+      this.unsubscribeError = null;
+    }
+    
+    await cameraManager.stop();
+    this.video = null;
+    startupLogger.info('CAMERA_ENGINE', 'Camera stopped');
+  }
 
-    if (this.video) {
-      this.video.srcObject = null;
-      this.video = null;
+  async switchCamera(deviceId: string): Promise<void> {
+    try {
+      this.video = await cameraManager.switchCamera(deviceId);
+      startupLogger.info('CAMERA_ENGINE', `Switched camera to ${deviceId}`);
+    } catch (error) {
+      startupLogger.error('CAMERA_ENGINE', 'Failed to switch camera', error);
+      throw error;
     }
   }
 
-  private startFrameLoop(): void {
-    const loop = () => {
-      if (!this.isRunning || !this.video) return;
-      
-      if (this.video.readyState === this.video.HAVE_ENOUGH_DATA) {
-        this.notifyFrame(this.video);
-      }
-      
-      this.animationFrame = requestAnimationFrame(loop);
+  getVideoElement(): HTMLVideoElement | null {
+    return this.video || cameraManager.getVideoElement();
+  }
+
+  getStream(): MediaStream | null {
+    return cameraManager.getStream();
+  }
+
+  getSettings(): CameraSettings {
+    const caps = cameraManager.getCapabilities();
+    return {
+      ...this.settings,
+      width: caps.width,
+      height: caps.height,
+      frameRate: caps.frameRate,
+      facingMode: caps.facingMode,
     };
-    
-    this.animationFrame = requestAnimationFrame(loop);
+  }
+
+  updateSettings(settings: Partial<CameraSettings>): void {
+    this.settings = { ...this.settings, ...settings };
+  }
+
+  setFacingMode(mode: 'user' | 'environment'): void {
+    this.facingMode = mode;
+    this.settings.facingMode = mode;
+    // Note: facingMode change requires re-initialization
+  }
+
+  takePhoto(): string | null {
+    return cameraManager.takePhoto();
+  }
+
+  getVideoDimensions(): { width: number; height: number } | null {
+    return cameraManager.getVideoDimensions();
+  }
+
+  isActive(): boolean {
+    return this.isRunning && cameraManager.isRunning();
+  }
+
+  isReady(): boolean {
+    return cameraManager.isReady();
+  }
+
+  getState() {
+    return cameraManager.getState();
+  }
+
+  getDiagnostics() {
+    return cameraManager.getDiagnostics();
   }
 
   onFrame(callback: CameraCallback): () => void {
@@ -143,65 +189,6 @@ export class CameraEngine {
         console.error('Error callback error:', e);
       }
     });
-  }
-
-  getVideoElement(): HTMLVideoElement | null {
-    return this.video;
-  }
-
-  getStream(): MediaStream | null {
-    return this.stream;
-  }
-
-  getSettings(): CameraSettings {
-    return { ...this.settings };
-  }
-
-  updateSettings(settings: Partial<CameraSettings>): void {
-    this.settings = { ...this.settings, ...settings };
-  }
-
-  setFacingMode(mode: 'user' | 'environment'): void {
-    this.facingMode = mode;
-    this.settings.facingMode = mode;
-  }
-
-  async switchCamera(deviceId: string): Promise<void> {
-    await this.start(deviceId);
-  }
-
-  takePhoto(): string | null {
-    if (!this.video || this.video.readyState !== this.video.HAVE_ENOUGH_DATA) {
-      return null;
-    }
-
-    const canvas = document.createElement('canvas');
-    canvas.width = this.video.videoWidth;
-    canvas.height = this.video.videoHeight;
-    
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
-
-    if (this.settings.mirror) {
-      ctx.translate(canvas.width, 0);
-      ctx.scale(-1, 1);
-    }
-    
-    ctx.drawImage(this.video, 0, 0);
-    
-    return canvas.toDataURL('image/jpeg', 0.9);
-  }
-
-  getVideoDimensions(): { width: number; height: number } | null {
-    if (!this.video) return null;
-    return {
-      width: this.video.videoWidth,
-      height: this.video.videoHeight,
-    };
-  }
-
-  isActive(): boolean {
-    return this.isRunning && this.stream !== null;
   }
 }
 

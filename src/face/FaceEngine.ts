@@ -202,6 +202,15 @@ export class FaceEngine {
   private startDetectionLoop(): void {
     const loop = async () => {
       if (!this.isRunning || !this.video) return;
+      
+      // Check if video has a valid stream and is playing
+      if (this.video.readyState < this.video.HAVE_METADATA || 
+          this.video.paused || 
+          this.video.ended ||
+          !this.video.srcObject) {
+        this.animationFrame = requestAnimationFrame(loop);
+        return;
+      }
 
       const now = Date.now();
       if (now - this.lastDetectionTime >= this.detectionInterval) {
@@ -217,6 +226,13 @@ export class FaceEngine {
 
   private async detect(): Promise<void> {
     if (!this.video || !this.isInitialized) return;
+    
+    // Additional safety check for video state
+    if (this.video.readyState < this.video.HAVE_ENOUGH_DATA ||
+        this.video.videoWidth === 0 ||
+        this.video.videoHeight === 0) {
+      return;
+    }
 
     try {
       const settings = getSetting('face');
@@ -256,7 +272,10 @@ export class FaceEngine {
         this.notifyDetection(results.slice(0, settings.maxFaces));
       }
     } catch (error) {
-      console.error('Face detection error:', error);
+      // Don't log errors if video is no longer valid
+      if (this.video && this.video.srcObject) {
+        console.error('Face detection error:', error);
+      }
     }
   }
 

@@ -14,7 +14,9 @@ import {
   ArrowRight,
   CheckCircle,
   AlertCircle,
-  Activity
+  Activity,
+  LogOut,
+  UserCog
 } from 'lucide-react';
 import { useAppStore } from '@/stores/appStore';
 import { useTeacherStore } from '@/stores/teacherStore';
@@ -26,7 +28,7 @@ import { DiagnosticsModal } from '@/components/DiagnosticsModal';
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const { currentTeacher, setMode, setCurrentLesson, setCurrentBoard, clearSession } = useAppStore();
+  const { currentTeacher, setMode, setCurrentLesson, setCurrentBoard, clearSession, setCurrentTeacher } = useAppStore();
   const { teachers, loadTeachers } = useTeacherStore();
   const { settings } = useSettingsStore();
   const [recentLessons, setRecentLessons] = useState<any[]>([]);
@@ -86,6 +88,11 @@ export default function Dashboard() {
 
   const handleTeachingMode = (lessonId?: string) => {
     navigate(`/teaching/${lessonId || ''}`);
+  };
+
+  const handleSwitchTeacher = () => {
+    setCurrentTeacher(null);
+    navigate('/');
   };
 
   if (!currentTeacher) {
@@ -158,6 +165,10 @@ export default function Dashboard() {
                   {currentTeacher.name} ({currentTeacher.code})
                 </span>
               </div>
+              
+              <Button variant="ghost" size="icon" onClick={handleSwitchTeacher} title="Đổi tài khoản / Đăng xuất">
+                <LogOut className="w-5 h-5" />
+              </Button>
               
               <Button variant="ghost" size="icon" onClick={() => setShowDiagnostics(true)} title="Kiểm tra hệ thống (Diagnostics)">
                 <Activity className="w-5 h-5 text-primary-600 dark:text-primary-400" />

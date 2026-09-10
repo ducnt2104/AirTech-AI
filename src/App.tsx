@@ -13,6 +13,7 @@ import Settings from '@/pages/Settings';
 import TeacherProfile from '@/pages/TeacherProfile';
 import Teaching from '@/pages/Teaching';
 import FirstRunSetup from '@/pages/FirstRunSetup';
+import Login from '@/pages/Login';
 import LoadingScreen from '@/components/LoadingScreen';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { DegradedModeIndicator, StartupPerformanceBadge } from '@/components/DegradedModeIndicator';
@@ -119,6 +120,7 @@ function AppRoutes() {
   }
 
   const needsSetup = teachers.length === 0;
+  const needsLogin = teachers.length > 0 && !currentTeacher;
 
   return (
     <ErrorBoundary>
@@ -127,6 +129,8 @@ function AppRoutes() {
       <Routes>
         {needsSetup ? (
           <Route path="/*" element={<FirstRunSetup />} />
+        ) : needsLogin ? (
+          <Route path="/*" element={<Login />} />
         ) : (
           <>
             <Route path="/" element={<Dashboard />} />

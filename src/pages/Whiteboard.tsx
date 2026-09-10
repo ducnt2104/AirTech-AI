@@ -1,11 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   PenTool, Highlighter, Eraser, MousePointer, ArrowUpRight,
   Minus, Square, Circle, Type, Undo2, Redo2,
   Trash2, Download, Save, RotateCcw, RotateCw,
   ZoomIn, ZoomOut, Maximize, Minimize, Settings,
-  Layers, Palette, MoreHorizontal, ArrowLeft, ArrowRight
+  Layers, Palette, MoreHorizontal, ArrowLeft, ArrowRight,
+  Video, VideoOff, Maximize2, Minimize2, Eye, EyeOff,
+  Move, Expand, Shrink, Loader2, AlertCircle, CheckCircle
 } from 'lucide-react';
 import { useAppStore } from '@/stores/appStore';
 import { useSettingsStore } from '@/stores/settingsStore';
@@ -16,6 +18,9 @@ import { Card } from '@/components/ui/Card';
 import { useTeacherWorkspace } from '@/stores/teacherWorkspaceStore';
 import { cn } from '@/utils/cn';
 import type { DrawingTool, Viewport } from '@/types';
+import { faceEngine } from '@/face/FaceEngine';
+import { handEngine } from '@/hand/HandEngine';
+import { cameraManager, CameraState } from '@/camera/CameraManager';
 
 export default function Whiteboard() {
   const navigate = useNavigate();
@@ -28,6 +33,135 @@ export default function Whiteboard() {
   const animationRef = useRef<number>();
   const [isToolbarVisible, setIsToolbarVisible] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  
+// Camera Preview (PiP) State - using CameraManager
+  const [cameraPreview, setCameraPreview] = useState<'hidden' | 'pip' | 'fullscreen'>('pip');
+  const [cameraState, setCameraState] = useState<CameraState>('idle');
+  const [cameraError, setCameraError] = useState<Error | null>(null);
+  const [showHandLandmarks, setShowHandLandmarks] = useState(true);
+  const [showFaceLandmarks, setShowFaceLandmarks] = useState(true);
+  const pipPositionRef = useRef({ x: 20, y: 20 });
+  const [pipPosition, setPipPosition] = useState({ x: 20, y: 20 });
+  const cameraUnsubscribe = useRef<(() => void) | null>(null);
+
+  // Get video element from CameraManager
+  const cameraVideoRef = cameraManager.getVideoElement();
+
+  // Initialize Camera for PiP using CameraManager
+  useEffect(() => {
+    let mounted = true;
+    
+    const initCamera = async () => {
+      try {
+        setCameraState('detecting');
+        
+        // Initialize camera via CameraManager (handles device selection, retries, etc.)
+        await cameraManager.initialize();
+        await cameraManager.start();
+        
+        if (!mounted) return;
+        
+        setCameraState('running');
+        
+        // Get video element for face/hand detection
+        const video = cameraManager.getVideoElement();
+        if (video) {
+          // Start face detection
+          if (faceEngine.isReady()) {
+            await faceEngine.start(video);
+          }
+          
+          // Start hand detection (uses same video stream)
+          if (handEngine.isReady()) {
+            await handEngine.start(video);
+          }
+        }
+        
+      } catch (error) {
+        console.warn('Camera initialization failed:', error);
+        if (mounted) {
+          setCameraError(error instanceof Error ? error : new Error(String(error)));
+        }
+      }
+    };
+    
+    initCamera();
+    
+    // Subscribe to camera state changes
+    cameraUnsubscribe.current = cameraManager.onStateChange((state, diagnostics) => {
+      if (mounted) {
+        setCameraState(state);
+        if (state === 'error') {
+          setCameraError(new Error(diagnostics.error || 'Camera error'));
+        } else if (state === 'running' || state === 'ready') {
+          setCameraError(null);
+        }
+      }
+    });
+    
+    return () => {
+      mounted = false;
+      if (cameraUnsubscribe.current) {
+        cameraUnsubscribe.current();
+      }
+      // CameraManager handles cleanup globally, but we stop face/hand engines
+      faceEngine.stop();
+      handEngine.stop();
+    };
+  }, []);
+
+  // Handle PiP drag
+  const handlePipDrag = useCallback((e: React.MouseEvent | React.TouchEvent) => {
+    if (cameraPreview !== 'pip') return;
+    
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+    
+    const container = containerRef.current;
+    if (!container) return;
+    
+    const rect = container.getBoundingClientRect();
+    const pipSize = 160; // PiP width
+    
+    let newX = clientX - rect.left - pipSize / 2;
+    let newY = clientY - rect.top - pipSize / 2;
+    
+    // Constrain to container bounds
+    newX = Math.max(10, Math.min(newX, rect.width - pipSize - 10));
+    newY = Math.max(10, Math.min(newY, rect.height - pipSize - 10));
+    
+    setPipPosition({ x: newX, y: newY });
+    pipPositionRef.current = { x: newX, y: newY };
+  }, [cameraPreview]);
+
+  // Toggle Camera Preview Mode
+  const toggleCameraPreview = () => {
+    setCameraPreview(prev => {
+      if (prev === 'hidden') return 'pip';
+      if (prev === 'pip') return 'fullscreen';
+      return 'pip'; // fullscreen -> pip
+    });
+  };
+
+  const hideCameraPreview = () => {
+    setCameraPreview('hidden');
+  };
+
+  const retryCamera = useCallback(async () => {
+    setCameraError(null);
+    try {
+      await cameraManager.initialize();
+      await cameraManager.start();
+      
+      const video = cameraManager.getVideoElement();
+      if (video) {
+        if (faceEngine.isReady()) await faceEngine.start(video);
+        if (handEngine.isReady()) await handEngine.start(video);
+      }
+    } catch (error) {
+      setCameraError(error instanceof Error ? error : new Error(String(error)));
+    }
+  }, []);
 
   useEffect(() => {
     if (!currentLesson || !currentBoard) {
@@ -453,6 +587,173 @@ export default function Whiteboard() {
               <Button variant="ghost" size="icon" onClick={handleToggleToolbar}>
                 <MoreHorizontal className="w-5 h-5" />
               </Button>
+            </Card>
+          </div>
+        )}
+
+        {/* Camera Preview (PiP) */}
+        {cameraPreview !== 'hidden' && cameraVideoRef && cameraState === 'running' && (
+          <>
+            {/* PiP Mode */}
+            {cameraPreview === 'pip' && (
+              <div
+                className="absolute z-30"
+                style={{ 
+                  left: pipPosition.x, 
+                  top: pipPosition.y,
+                  transition: 'left 0.1s, top 0.1s'
+                }}
+                onMouseDown={handlePipDrag}
+                onTouchStart={handlePipDrag}
+              >
+                <div className="relative w-40 h-30 bg-black rounded-xl overflow-hidden shadow-2xl border-2 border-primary-500/50">
+                  <video
+                    ref={(el) => { if (el) el.srcObject = cameraVideoRef?.srcObject; }}
+                    className="w-full h-full object-cover"
+                    autoPlay
+                    muted
+                    playsInline
+                    style={{ transform: 'scaleX(-1)' }} // Mirror for user
+                  />
+                  <div className="absolute inset-0 flex items-center justify-between p-1 pointer-events-none">
+                    <div className="flex gap-1">
+                      {showFaceLandmarks && faceEngine.getCanvas() && (
+                        <canvas 
+                          className="absolute inset-0 w-full h-full" 
+                          style={{ 
+                            transform: 'scaleX(-1)',
+                            opacity: 0.8 
+                          }} 
+                        />
+                      )}
+                      {showHandLandmarks && handEngine.getLastResults().length > 0 && (
+                        <canvas 
+                          className="absolute inset-0 w-full h-full" 
+                          style={{ 
+                            transform: 'scaleX(-1)',
+                            opacity: 0.8 
+                          }} 
+                        />
+                      )}
+                    </div>
+                    <div className="flex gap-1">
+                      <Button variant="ghost" size="icon" onClick={() => setShowFaceLandmarks(!showFaceLandmarks)} title="Khuôn mặt">
+                        {showFaceLandmarks ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+                      </Button>
+                      <Button variant="ghost" size="icon" onClick={() => setShowHandLandmarks(!showHandLandmarks)} title="Cử chỉ tay">
+                        <Move className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="absolute bottom-1 left-1 right-1 flex justify-center gap-1">
+                    <Button variant="ghost" size="icon" onClick={toggleCameraPreview} title="Phóng to camera">
+                      <Maximize2 className="w-4 h-4" />
+                    </Button>
+                    <Button variant="ghost" size="icon" onClick={hideCameraPreview} title="Ẩn camera">
+                      <VideoOff className="w-4 h-4" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+            
+            {/* Fullscreen Calibration Mode */}
+            {cameraPreview === 'fullscreen' && (
+              <div className="fixed inset-0 z-50 bg-black flex flex-col">
+                <div className="flex items-center justify-between p-4 bg-black/80 backdrop-blur-md border-b border-white/10">
+                  <h2 className="text-white font-semibold flex items-center gap-2">
+                    <Video className="w-5 h-5" />
+                    Chế độ căn chỉnh Camera (Calibration)
+                  </h2>
+                  <div className="flex items-center gap-2">
+                    <Button variant="ghost" size="icon" onClick={() => setShowFaceLandmarks(!showFaceLandmarks)} title="Khuôn mặt">
+                      {showFaceLandmarks ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
+                    </Button>
+                    <Button variant="ghost" size="icon" onClick={() => setShowHandLandmarks(!showHandLandmarks)} title="Cử chỉ tay">
+                      <Move className="w-5 h-5" />
+                    </Button>
+                    <Button variant="primary" onClick={toggleCameraPreview} title="Thu nhỏ về góc màn hình">
+                      <Minimize2 className="w-4 h-4 mr-1" />
+                      Thu nhỏ
+                    </Button>
+                    <Button variant="ghost" size="icon" onClick={hideCameraPreview} title="Ẩn camera">
+                      <VideoOff className="w-5 h-5" />
+                    </Button>
+                  </div>
+                </div>
+                
+                <div className="flex-1 flex items-center justify-center relative">
+                  <video
+                    ref={(el) => { if (el) el.srcObject = cameraVideoRef?.srcObject; }}
+                    className="max-w-full max-h-[80vh] object-contain"
+                    autoPlay
+                    muted
+                    playsInline
+                    style={{ transform: 'scaleX(-1)' }}
+                  />
+                  
+                  {/* Center crosshair for calibration */}
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    <div className="w-64 h-64 border-2 border-primary-500/50 rounded-xl" />
+                    <div className="absolute w-full h-full flex items-center justify-center">
+                      <div className="w-1 h-24 bg-primary-500/50" />
+                      <div className="h-1 w-24 bg-primary-500/50" />
+                    </div>
+                  </div>
+                  
+                  {/* Hand/Face landmarks overlay */}
+                  {showFaceLandmarks && faceEngine.getCanvas() && (
+                    <canvas 
+                      className="absolute inset-0 max-w-full max-h-[80vh] object-contain" 
+                      style={{ 
+                        transform: 'scaleX(-1)',
+                        opacity: 0.9 
+                      }} 
+                    />
+                  )}
+                  {showHandLandmarks && handEngine.getLastResults().length > 0 && (
+                    <canvas 
+                      className="absolute inset-0 max-w-full max-h-[80vh] object-contain" 
+                      style={{ 
+                        transform: 'scaleX(-1)',
+                        opacity: 0.9 
+                      }} 
+                    />
+                  )}
+                </div>
+                
+                <div className="p-4 bg-black/80 backdrop-blur-md border-t border-white/10 text-center">
+                  <p className="text-white/70 text-sm">
+                    Hãy đứng vào khung hình vuông ở giữa. Điều chỉnh ánh sáng và khoảng cách sao cho khuôn mặt và tay rõ nét.
+                  </p>
+                  <p className="text-white/50 text-xs mt-1">
+                    Nhấn "Thu nhỏ" để quay lại bảng trắng, hoặc "Ẩn camera" để tắt hoàn toàn.
+                  </p>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* Camera Error Overlay */}
+        {cameraPreview !== 'hidden' && cameraError && (
+          <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70">
+            <Card className="w-full max-w-md mx-4 p-6 text-center">
+              <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-red-500/20 flex items-center justify-center">
+                <AlertCircle className="w-8 h-8 text-red-400" />
+              </div>
+              <h3 className="text-lg font-semibold text-white mb-2">Lỗi Camera</h3>
+              <p className="text-white/80 mb-4">{cameraError.message}</p>
+              <div className="flex gap-2 justify-center">
+                <Button variant="primary" onClick={retryCamera}>
+                  <Loader2 className="w-4 h-4 mr-2" />
+                  Thử lại
+                </Button>
+                <Button variant="ghost" onClick={hideCameraPreview}>
+                  <VideoOff className="w-4 h-4 mr-2" />
+                  Ẩn camera
+                </Button>
+              </div>
             </Card>
           </div>
         )}

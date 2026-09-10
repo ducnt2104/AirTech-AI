@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
 import type { Teacher, TeacherPreferences } from '@/types';
 import { TeacherRepository } from '@/database';
+import { persistDatabase } from '@/database';
 
 export { TeacherRepository } from '@/database';
 
@@ -67,8 +68,12 @@ export const useTeacherStore = create<TeacherState>((set, get) => ({
       
       TeacherRepository.create(teacher);
       
+      // Ensure database is persisted to IndexedDB before returning
+      await persistDatabase();
+      
       set((state) => ({
         teachers: [teacher, ...state.teachers],
+        currentTeacher: teacher, // Auto-set as active teacher
         isLoading: false,
       }));
       

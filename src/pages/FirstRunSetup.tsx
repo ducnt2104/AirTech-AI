@@ -33,6 +33,8 @@ export default function FirstRunSetup() {
   });
   const [faceSampleCount, setFaceSampleCount] = useState(5);
   const [enrollmentCount, setEnrollmentCount] = useState(5);
+  const [isCreating, setIsCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   useEffect(() => {
     loadSettings();
@@ -56,39 +58,51 @@ export default function FirstRunSetup() {
     setStep(prev => Math.max(prev - 1, 1));
   };
 
-  const handleStep1 = () => {
+  const handleStep1 = async () => {
     if (!teacherData.name.trim() || !teacherData.code.trim() || !teacherData.subject.trim()) {
       return;
     }
-    const now = new Date();
-    const teacher: Teacher = {
-      id: crypto.randomUUID(),
-      name: teacherData.name.trim(),
-      code: teacherData.code.trim(),
-      subject: teacherData.subject.trim(),
-      preferences: {
-        cameraId: '',
-        cameraResolution: { width: 1280, height: 720 },
-        gestureSensitivity: 0.7,
-        faceRecognitionThreshold: 0.6,
-        drawingSmoothing: 0.3,
-        theme: 'system',
-        language: 'vi',
-        performanceMode: 'balanced',
-        privacyMode: true,
-        autoSaveInterval: 30000,
-        showCursor: true,
-        cursorSize: 12,
-      },
-      faceEmbedding: undefined,
-      faceImages: [],
-      createdAt: now,
-      updatedAt: now,
-    };
+    
+    setIsCreating(true);
+    setCreateError(null);
+    
+    try {
+      const now = new Date();
+      const teacher: Teacher = {
+        id: crypto.randomUUID(),
+        name: teacherData.name.trim(),
+        code: teacherData.code.trim(),
+        subject: teacherData.subject.trim(),
+        preferences: {
+          cameraId: '',
+          cameraResolution: { width: 1280, height: 720 },
+          gestureSensitivity: 0.7,
+          faceRecognitionThreshold: 0.6,
+          drawingSmoothing: 0.3,
+          theme: 'system',
+          language: 'vi',
+          performanceMode: 'balanced',
+          privacyMode: true,
+          autoSaveInterval: 30000,
+          showCursor: true,
+          cursorSize: 12,
+        },
+        faceEmbedding: undefined,
+        faceImages: [],
+        createdAt: now,
+        updatedAt: now,
+      };
 
-    createTeacher(teacher);
-    setCurrentTeacher(teacher);
-    setStep(2);
+      // Use the store's createTeacher which handles DB persistence
+      const createdTeacher = await createTeacher(teacher);
+      setCurrentTeacher(createdTeacher);
+      setStep(2);
+    } catch (error) {
+      setCreateError('Không thể tạo tài khoản giáo viên. Vui lòng thử lại.');
+      console.error('Create teacher error:', error);
+    } finally {
+      setIsCreating(false);
+    }
   };
 
   const handleStep2 = async () => {
@@ -199,11 +213,18 @@ export default function FirstRunSetup() {
             <div className="space-y-4">
               <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Bước 1: Thông tin giáo viên</h2>
               
+              {createError && (
+                <Card className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 animate-fade-in">
+                  <p className="text-sm text-red-600 dark:text-red-400">{createError}</p>
+                </Card>
+              )}
+              
               <Input
                 label="Họ và tên *"
                 value={teacherData.name}
                 onChange={(e) => setTeacherData(prev => ({ ...prev, name: e.target.value }))}
                 placeholder="Ví dụ: Nguyễn Văn A"
+                disabled={isCreating}
               />
               
               <Input
@@ -211,6 +232,7 @@ export default function FirstRunSetup() {
                 value={teacherData.code}
                 onChange={(e) => setTeacherData(prev => ({ ...prev, code: e.target.value }))}
                 placeholder="Ví dụ: GV001"
+                disabled={isCreating}
               />
               
               <Input
@@ -218,11 +240,21 @@ export default function FirstRunSetup() {
                 value={teacherData.subject}
                 onChange={(e) => setTeacherData(prev => ({ ...prev, subject: e.target.value }))}
                 placeholder="Ví dụ: Toán 10"
+                disabled={isCreating}
               />
               
-              <Button onClick={handleStep1} variant="primary" className="w-full">
-                <Loader2 className="w-4 h-4 mr-2" />
-                Tiếp tục
+              <Button onClick={handleStep1} variant="primary" className="w-full" disabled={isCreating} loading={isCreating}>
+                {isCreating ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    Đang tạo tài khoản...
+                  </>
+                ) : (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2" />
+                    Tiếp tục
+                  </>
+                )}
               </Button>
             </div>
           )}
